@@ -1,0 +1,142 @@
+import os
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from database import Database
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=os.getenv('BOT_TOKEN'))
+dp = Dispatcher()
+db = Database('construction.db')
+
+ADMIN_ID = int(os.getenv('ADMIN_ID', 803673763))
+
+class ReportStates(StatesGroup):
+    waiting_for_report = State()
+    waiting_for_fio = State()
+
+# Главное меню
+def get_main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="Многоквартирные дома")],
+            [types.KeyboardButton(text="Дома")],
+            [types.KeyboardButton(text="Секции")],
+            [types.KeyboardButton(text="Дуплексы")]
+        ],
+        resize_keyboard=True
+    )
+    return keyboard
+
+# Клавиатура после отправки отчета
+def get_after_report_keyboard(object_type, object_id, apartment_id=None):
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✏️ Добавить еще отчет", 
+                                  callback_data=f"add_more:{object_type}:{object_id}:{apartment_id or ''}")],
+        [types.InlineKeyboardButton(text="← Назад", 
+                                  callback_data=f"back:{object_type}:{object_id}:{apartment_id or ''}")],
+        [types.InlineKeyboardButton(text="🏠 Главное меню", 
+                                  callback_data="main_menu")]
+    ])
+    return keyboard
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    user = db.get_user(message.from_user.id)
+    
+    if not user:
+        await message.answer("👋 Добро пожаловать! Для регистрации введите ваше ФИО:")
+        await state.set_state(ReportStates.waiting_for_fio)
+    else:
+        await message.answer("🏠 Главное меню:", reply_markup=get_main_keyboard())
+
+@dp.message(ReportStates.waiting_for_fio)
+async def process_fio(message: types.Message, state: FSMContext):
+    fio = message.text
+    db.add_user(message.from_user.id, message.from_user.username, fio)
+    await state.clear()
+    await message.answer(f"✅ Регистрация завершена, {fio}!", reply_markup=get_main_keyboard())
+# Обработка кнопок после отправки отчета
+@dp.callback_query(F.data.startswith("add_more:"))
+async def add_more_report(callback: types.CallbackQuery, state: FSMContext):
+    data = callback.data.split(":")
+    object_type = data[1]
+    object_id = data[2]
+    apartment_id = data[3] if data[3] else None
+    
+    obj = db.get_object(object_id)
+    if apartment_id and apartment_id != "None":
+        apartment = db.get_apartment(apartment_id)
+        address_text = f"{obj[1]}, кв. {apartment[2]}"
+    else:
+        address_text = obj[1]
+    
+    await callback.message.answer(f"📝 Введите новый отчет для {address_text}:")
+    await state.update_data(object_type=object_type, object_id=object_id, apartment_id=apartment_id)
+    await state.set_state(ReportStates.waiting_for_report)
+    await callback.answer()
+
+# Обработка кнопки "Назад"
+@dp.callback_query(F.data.startswith("back:"))
+async def back_to_list(callback: types.CallbackQuery):
+    data = callback.data.split(":")
+    object_type = data[1]
+    object_id = data[2]
+    apartment_id = data[3] if data[3] else None
+    
+    if apartment_id and apartment_id != "None":
+        # Если была квартира, возвращаем к списку квартир
+        apartments = db.get_apartments(object_id)
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+        for apt in apartments:
+            keyboard.inline_keyboard.append([
+                types.InlineKeyboardButton(text=f"Кв. {apt[1]}", callback_data=f"apartment:{apt[0]}")
+            ])
+        await callback.message.answer("🏠 Выберите квартиру:", reply_markup=keyboard)
+    else:
+        # Если не было квартиры, возвращаем к списку объектов этого типа
+        objects = db.get_objects_by_type(object_type)
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+        for obj in objects:
+            keyboard.inline_keyboard.append([
+                types.InlineKeyboardButton(text=obj[1], callback_data=f"object:{obj[0]}")
+            ])
+        await callback.message.answer("🏢 Выберите адрес:", reply_markup=keyboard)
+    
+    await callback.answer()
+
+# Обработка кнопки "Главное меню"
+@dp.callback_query(F.data == "main_menu")
+async def back_to_main(callback: types.CallbackQuery):
+    await callback.message.answer("🏠 Главное меню:", reply_markup=get_main_keyboard())
+    await callback.answer()
+
+# Панель администратора
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет доступа к панели администратора.")
+        return
+    
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="➕ Добавить объект", callback_data="admin_add_object")],
+        [types.InlineKeyboardButton(text="📊 Просмотреть отчеты", callback_data="admin_view_reports")],
+        [types.InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin_main_menu")]
+    ])
+    
+    await message.answer("👨‍💼 Панель администратора:", reply_markup=keyboard)
+
+if __name__ == '__main__':
+    # Создаем базу данных и таблицы
+    db.create_tables()
+    
+    # Добавляем администратора
+    db.add_user(ADMIN_ID, "admin", "Администратор", "admin")
+    
+    print("Бот запущен!")
+    dp.run_polling(bot)
