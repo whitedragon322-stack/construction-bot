@@ -1,0 +1,166 @@
+import sqlite3
+import datetime
+
+class Database:
+    def __init__(self, db_file):
+        self.connection = sqlite3.connect(db_file, check_same_thread=False)
+        self.cursor = self.connection.cursor()
+        self.create_tables()
+
+    def create_tables(self):
+        # Таблица пользователей
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                username TEXT,
+                full_name TEXT,
+                role TEXT DEFAULT 'worker',
+                registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица типов объектов (заранее заполняем)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS object_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE
+            )
+        ''')
+        
+        # Вставляем типы объектов, если их нет
+        object_types = ['Многоквартирные дома', 'Дома', 'Секции', 'Дуплексы']
+        for type_name in object_types:
+            self.cursor.execute('INSERT OR IGNORE INTO object_types (name) VALUES (?)', (type_name,))
+        
+        # Таблица объектов
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS objects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type_id INTEGER,
+                address TEXT,
+                FOREIGN KEY (type_id) REFERENCES object_types (id)
+            )
+        ''')
+        
+        # Таблица квартир (для многоквартирных домов)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS apartments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_id INTEGER,
+                number TEXT,
+                FOREIGN KEY (object_id) REFERENCES objects (id)
+            )
+        ''')
+        
+        # Таблица отчетов
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                object_id INTEGER,
+                apartment_id INTEGER,
+                report_text TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id),
+                FOREIGN KEY (object_id) REFERENCES objects (id),
+                FOREIGN KEY (apartment_id) REFERENCES apartments (id)
+            )
+        ''')
+        
+        self.connection.commit()
+
+    # Методы для пользователей
+    def add_user(self, user_id, username, full_name, role='worker'):
+        self.cursor.execute('''
+            INSERT OR REPLACE INTO users (user_id, username, full_name, role)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, full_name, role))
+        self.connection.commit()
+
+    def get_user(self, user_id):
+        self.cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        return self.cursor.fetchone()
+
+    # Методы для объектов
+    def get_objects_by_type(self, type_name):
+        self.cursor.execute('''
+            SELECT o.id, o.address 
+            FROM objects o 
+            JOIN object_types ot ON o.type_id = ot.id 
+            WHERE ot.name = ?
+        ''', (type_name,))
+        return self.cursor.fetchall()
+
+    def get_object(self, object_id):
+        self.cursor.execute('''
+            SELECT o.id, o.address, ot.name 
+            FROM objects o 
+            JOIN object_types ot ON o.type_id = ot.id 
+            WHERE o.id = ?
+        ''', (object_id,))
+        return self.cursor.fetchone()
+
+    # Методы для квартир
+    def get_apartments(self, object_id):
+        self.cursor.execute('SELECT id, number FROM apartments WHERE object_id = ?', (object_id,))
+        return self.cursor.fetchall()
+
+    def get_apartment(self, apartment_id):
+        self.cursor.execute('SELECT * FROM apartments WHERE id = ?', (apartment_id,))
+        return self.cursor.fetchone()
+
+    # Методы для отчетов
+    def add_report(self, user_id, object_id, apartment_id, report_text):
+        self.cursor.execute('''
+            INSERT INTO reports (user_id, object_id, apartment_id, report_text)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, object_id, apartment_id, report_text))
+        self.connection.commit()
+
+    def get_reports_by_object(self, object_id, apartment_id=None):
+        if apartment_id:
+            self.cursor.execute('''
+                SELECT r.*, u.full_name 
+                FROM reports r 
+                JOIN users u ON r.user_id = u.id 
+                WHERE r.object_id = ? AND r.apartment_id = ?
+                ORDER BY r.created_at DESC
+            ''', (object_id, apartment_id))
+        else:
+            self.cursor.execute('''
+                SELECT r.*, u.full_name 
+                FROM reports r 
+                JOIN users u ON r.user_id = u.id 
+                WHERE r.object_id = ? AND r.apartment_id IS NULL
+                ORDER BY r.created_at DESC
+            ''', (object_id,))
+        return self.cursor.fetchall()
+
+    # Методы для администратора (добавление объектов и квартир)
+    def add_object(self, type_name, address):
+        self.cursor.execute('SELECT id FROM object_types WHERE name = ?', (type_name,))
+        type_row = self.cursor.fetchone()
+        if type_row:
+            type_id = type_row[0]
+            self.cursor.execute('INSERT INTO objects (type_id, address) VALUES (?, ?)', (type_id, address))
+            self.connection.commit()
+            return self.cursor.lastrowid
+        return None
+
+    def add_apartment(self, object_id, number):
+        self.cursor.execute('INSERT INTO apartments (object_id, number) VALUES (?, ?)', (object_id, number))
+        self.connection.commit()
+
+    def get_all_objects(self):
+        self.cursor.execute('''
+            SELECT o.id, o.address, ot.name 
+            FROM objects o 
+            JOIN object_types ot ON o.type_id = ot.id 
+            ORDER BY ot.name, o.address
+        ''')
+        return self.cursor.fetchall()
+
+    def get_apartments_by_object(self, object_id):
+        self.cursor.execute('SELECT id, number FROM apartments WHERE object_id = ? ORDER BY number', (object_id,))
+        return self.cursor.fetchall()
